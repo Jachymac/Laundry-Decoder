@@ -4,21 +4,21 @@ Flutter aplikace pro rozpoznání praních symbolů s pomocí AI.
 
 ## O Projektu
 
-Aplikace řeší problém: lidé neznají praní symboly na etiketách. Workflow:
+Aplikace řeší problém neznalosti praních symbolů na etiketách oblečení. Workflow:
 
-1. Vyfotíš symbol nebo vybereš z galerie
-2. Aplikace ho preprocessuje (kontrast, šum)
-3. Google Gemini AI rozpozná symbol
-4. Dostaneš instrukce v češtině
+1. Nahrání symbolu z fotoaparátu nebo galerie
+2. Lokální předzpracování obrázku (kontrast, redukce šumu)
+3. Analýza pomocí Google Gemini AI
+4. Zobrazení instrukcí v češtině
 
-## Features
+## Funkce
 
-- AI Rozpoznání (Gemini 2.5 Flash, 85-90% přesnost)
-- Image Preprocessing (thresholding, kontrast)
-- Asynchronní Processing (bez zamrznutí UI)
-- Offline Katalog (36 symbolů bez Internetu)
-- Caching (ušetření API calls)
-- Porovnání s Katalogem (vizuální ověření)
+- AI rozpoznání (Gemini 2.5 Flash, 85-90% přesnost)
+- Předzpracování obrázků (thresholding, kontrast)
+- Asynchronní zpracování (bez zamrznutí UI)
+- Offline katalog (36 symbolů bez připojení)
+- Caching výsledků (úspora API volání)
+- Porovnání s katalogem (vizuální ověření)
 - Material Design 3
 - iOS, Android, Web
 
@@ -29,15 +29,21 @@ Aplikace řeší problém: lidé neznají praní symboly na etiketách. Workflow
 - Framework: Flutter 3.41.3
 - Jazyk: Dart (null-safe)
 - AI Model: Google Generative AI (Gemini 2.5 Flash)
-- Image Processing: dart package:image (thresholding, morphology)
-- Storage: SharedPreferences (MD5 hash-based cache)
-- Platform: Android 7.0+, iOS 11.0+, Web
+- Zpracování obrázků: dart package:image (thresholding, morfologie)
+- Úložiště: SharedPreferences (MD5 hash-based cache)
+- Platformy: Android 7.0+, iOS 11.0+, Web
 
 ---
 
 ## Instalace
 
-Požadavky: Flutter 3.30+, Dart 3.0+, Google Generative AI API Key
+### Požadavky
+
+- Flutter 3.30+
+- Dart 3.0+
+- Google Generative AI API klíč
+
+### Kroky
 
 ```bash
 git clone https://github.com/Jachymac/Laundry-Decoder.git
@@ -45,44 +51,72 @@ cd Laundry-Decoder/app
 flutter pub get
 ```
 
-Nastav API Key:
-1. Jdi na https://ai.google.dev/app/apikey
-2. Vytvoř API Key (zdarma)
-3. V lib/main.dart vlož: `const String apiKey = 'YOUR_API_KEY_HERE';`
+### Konfigurace API klíče
 
-Spuštění:
+1. Přejděte na https://ai.google.dev/app/apikey
+2. Vytvořte API klíč (zdarma)
+3. Spusťte aplikaci s definicí klíče:
+
 ```bash
-flutter run -d android  # nebo ios, web
+flutter run --dart-define=API_KEY=vash_klic
+```
+
+Pro konkrétní platformu:
+
+```bash
+flutter run -d android --dart-define=API_KEY=vash_klic
+flutter run -d ios --dart-define=API_KEY=vash_klic
+flutter run -d chrome --dart-define=API_KEY=vash_klic
 ```
 
 ---
 
-## Jak Používat
+## Použití
 
-1. Vyjímej symbol: Klikni Fotoaparát (live fotka) nebo Galerie (existující foto)
-2. Ořez: Aplikace ti umožňuje ořezat na čtverec
-3. Preview: Přepínač mezi Originál-Preprocessováno
-4. Analýza: Klikni Skenuj - vidíš progress (Dekódování → Zpracování → AI)
-5. Výsledky: Název, instrukce, tipy, varování, porovnání s katalogem
+1. **Výběr symbolu**: Vyberte fotoaparát (live fotografie) nebo galerie (existující fotografie)
+2. **Ořez**: Použijte nástroj pro ořez obrázku do čtvercového formátu
+3. **Náhled**: Přepínač mezi originální a předzpracovanou fotografií
+4. **Analýza**: Spusťte skenování a sledujte průběh (Dekódování → Zpracování → AI)
+5. **Výsledky**: Zobrazení názvu, instrukcí, tipů, varování a porovnání s katalogem
 
-Offline Režim:
-- Druhá záložka Katalog obsahuje 13 symbolů bez Internetu
-- Hledání a filtrování podle kategorie
+### Offline režim
 
----
-
-## Workflow
-
-Obrázek -> Preprocessing -> Caching -> API/Fallback -> Catalog Matching -> Display
-
-Preprocessing: Grayscale, kontrast, thresholding, morfologické operace
-API Limity: 353 RPM, 250K TPM (free tier)
-Fallback: Offline katalog, fuzzy matching
+- Druhá záložka "Katalog" obsahuje 36 symbolů bez připojení k internetu
+- Podpora hledání a filtrování podle kategorie
 
 ---
 
-## Troubleshooting
+## Architektura
 
-- API key error: Zkontroluj https://ai.google.dev/app/apikey
-- Build error: `flutter clean && flutter pub get && flutter run`
-- Symbol not recognized: Lépe vyfotit, lepší osvětlení, nebo vybrat z katalogu
+```
+Obrázek → Předzpracování → Caching → API/Fallback → Porovnání s katalogem → Zobrazení
+```
+
+### Předzpracování
+
+- Převod do stupňů šedi
+- Adaptivní thresholding
+- Morfologické operace
+- Úprava velikosti a osazení
+
+### API limity
+
+- Limit: 353 RPM, 250K TPM (free tier)
+- Fallback: Offline katalog s fuzzy matching
+
+---
+
+## Řešení problémů
+
+| Problém | Řešení |
+|---------|--------|
+| Chyba API klíče | Ověřte klíč na https://ai.google.dev/app/apikey |
+| Chyba buildu | Spusťte `flutter clean && flutter pub get && flutter run` |
+| Symbol není rozpoznán | Lepší fotografie, lepší osvětlení, nebo vyberte ze katalogu |
+
+---
+
+## Licence
+
+MIT
+
