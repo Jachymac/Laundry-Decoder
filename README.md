@@ -20,7 +20,7 @@ Aplikace řeší problém neznalosti praních symbolů na etiketách oblečení.
 - Caching výsledků (úspora API volání)
 - Porovnání s katalogem (vizuální ověření)
 - Material Design 3
-- iOS, Android, Web
+- iOS, Android, Web 
 
 ---
 
