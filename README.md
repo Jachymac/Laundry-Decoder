@@ -16,7 +16,7 @@ Aplikace řeší problém: lidé neznají praní symboly na etiketách. Workflow
 - AI Rozpoznání (Gemini 2.5 Flash, 85-90% přesnost)
 - Image Preprocessing (thresholding, kontrast)
 - Asynchronní Processing (bez zamrznutí UI)
-- Offline Katalog (13 symbolů bez Internetu)
+- Offline Katalog (36 symbolů bez Internetu)
 - Caching (ušetření API calls)
 - Porovnání s Katalogem (vizuální ověření)
 - Material Design 3
