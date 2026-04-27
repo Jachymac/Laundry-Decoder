@@ -399,29 +399,6 @@ class _DictionaryScreenState extends State<DictionaryScreen> {
     }
   }
 
-  IconData _getCategoryIcon(String category) {
-    switch (category) {
-      case "Praní":
-        return Icons.local_laundry_service;
-      case "Bělení":
-        return Icons.water_drop;
-      case "Sušení v sušičce":
-        return Icons.dry_cleaning;
-      case "Přírodní sušení":
-        return Icons.air;
-      case "Ždímání":
-        return Icons.rotate_right;
-      case "Žehlení":
-        return Icons.iron;
-      case "Chemické čištění":
-        return Icons.science;
-      case "Profesionální čištění":
-        return Icons.cleaning_services;
-      default:
-        return Icons.label;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(

@@ -1,27 +1,25 @@
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:google_generative_ai/google_generative_ai.dart';
-import 'package:image/image.dart' as img;
-import 'image_preprocessor.dart';
+import 'image_processing_helper.dart';
 
 class AiService {
-  // DŮLEŽITÉ: Vlož sem svůj API klíč z Google AI Studio
-  // https://aistudio.google.com/app/apikey
-  static const String _apiKey = 'AIzaSyAWC5XsCvgCzJAbIy00EwcpRID75aPNHoo';
+  // DŮLEŽITÉ: API klíč se musí předávat externě, aby nebyl commitnutý do repozitáře.
+  // Například při vývoji použij: flutter run --dart-define=API_KEY=tvuj_novy_klic
+  static final String _apiKey = const String.fromEnvironment('API_KEY', defaultValue: '');
   static const String _model = 'gemini-2.5-flash'; // Gemini 2.5 Flash je dostupný ve free tieru
 
   /// Analyzuje fotografii pracího symbolu pomocí Gemini AI
   /// 
   /// Vrací strukturovanou odpověď s názvem symbolu a instrukcemi
-  static Future<String> analyzeImage(File imageFile) async {
-    if (_apiKey == 'TVŮJ_API_KLÍČ_SEM' || _apiKey.isEmpty) {
+  static Future<String> analyzeImage(Uint8List imageBytes) async {
+    if (_apiKey.isEmpty) {
       return '❌ Chyba: API klíč není nastaven.\n\n'
-          'Otevři soubor ai_service.dart a vlož svůj API klíč z Google AI Studio.\n'
-          'Získáš ho zde: https://aistudio.google.com/app/apikey';
+          'Spusť aplikaci s novým klíčem přes dart-define:\n'
+          'flutter run --dart-define=API_KEY=tvuj_novy_klic\n'
+          'Nebo ho nastav v build procesu jako Dart define.';
     }
 
     try {
-      final imageBytes = await imageFile.readAsBytes();
       final preprocessedBytes = await _preprocessImageBytes(imageBytes);
 
       final model = GenerativeModel(
@@ -82,21 +80,20 @@ DŮLEŽITÉ:
       if (e.message.contains('API_KEY_INVALID')) {
         return '❌ Neplatný API klíč.\n\n'
             'Zkontroluj, že máš správný klíč z Google AI Studio.';
-      } else if (e.message.contains('RATE_LIMIT')) {
-        return '⏳ Příliš mnoho požadavků.\n\n'
-            'Počkej chvíli a zkus to znovu.';
+      } else if (e.message.contains('RATE_LIMIT') || e.message.contains('503')) {
+        return '⏳ Gemini server je momentálně přetížený.\n\n'
+            'Google AI má vysokou poptávku. Počkej prosím 30-60 sekund a zkus to znovu.\n\n'
+            'Tip: Zkus to později nebo v méně vytížené hodině.';
       } else if (e.message.contains('SAFETY')) {
         return '🚫 Obsah fotky byl označen jako problematický.\n\n'
             'Zkus vyfotit pouze pracovní symbol bez okolního obsahu.';
+      } else if (e.message.contains('high demand') || e.message.contains('UNAVAILABLE')) {
+        return '⏳ Služba je momentálně nedostupná.\n\n'
+            'Gemini API zažívá vrcholní zatížení. Zkus to za chvíli znovu.';
       }
 
       return '❌ Chyba Gemini API: ${e.message}\n\n'
           'Zkus to prosím znovu za chvíli.';
-    } on SocketException catch (e) {
-      // Problémy s připojením
-      return '📡 Chyba připojení k internetu.\n\n'
-          'Zkontroluj své připojení a zkus to znovu.\n'
-          'Detail: ${e.message}';
     } on FormatException catch (e) {
       // Problém s formátem obrázku
       return '🖼️ Problém s formátem fotky.\n\n'
@@ -170,32 +167,20 @@ Odpověz ve strukturovaném formátu:
   /// Pokud je potřeba, obrázek před odesláním zpracujeme tak, aby byl kontrastní a čistý.
   static Future<Uint8List> _preprocessImageBytes(Uint8List imageBytes) async {
     try {
-      final original = img.decodeImage(imageBytes);
-      if (original == null) {
-        return imageBytes;
-      }
-
-      final processed = ImagePreprocessor.preprocessForModel(original);
-      final resized = img.copyResize(
-        processed,
-        width: 512,
-        height: 512,
-      );
-
-      return Uint8List.fromList(img.encodeJpg(resized, quality: 85));
+      final result = await ImageProcessingHelper.processBytes(imageBytes);
+      return result.compressedBytes;
     } catch (_) {
       return imageBytes;
     }
   }
 
   /// Hromadná analýza - pokud má uživatel více symbolů na jedné fotce
-  static Future<String> analyzeMultipleSymbols(File imageFile) async {
-    if (_apiKey == 'TVŮJ_API_KLÍČ_SEM' || _apiKey.isEmpty) {
-      return '❌ API klíč není nastaven.';
+  static Future<String> analyzeMultipleSymbols(Uint8List imageBytes) async {
+    if (_apiKey.isEmpty) {
+      return '❌ API klíč není nastaven. Spusť aplikaci s --dart-define=API_KEY=tvuj_novy_klic.';
     }
 
     try {
-      final imageBytes = await imageFile.readAsBytes();
       final preprocessedBytes = await _preprocessImageBytes(imageBytes);
 
       final model = GenerativeModel(

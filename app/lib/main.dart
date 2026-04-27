@@ -1,17 +1,16 @@
 import 'dart:io';
-import 'dart:convert';
-import 'dart:async';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:crypto/crypto.dart';
+import 'dart:convert';
 import 'dictionary_screen.dart';
 import 'ai_service.dart';
 import 'image_processing_helper.dart';
-import 'symbol_catalog.dart';
+import 'online_status.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -45,22 +44,10 @@ class AppNavigator extends StatefulWidget {
 class _AppNavigatorState extends State<AppNavigator> {
   int _currentIndex = 0;
 
-  late final List<Widget> _screens;
-
-  @override
-  void initState() {
-    super.initState();
-    _screens = [
-      MainScreen(onNavigateToCatalog: _navigateToCatalog),
-      const DictionaryScreen(),
-    ];
-  }
-
-  void _navigateToCatalog() {
-    setState(() {
-      _currentIndex = 1;
-    });
-  }
+  final List<Widget> _screens = [
+    const MainScreen(),
+    const DictionaryScreen(),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -94,17 +81,16 @@ class _AppNavigatorState extends State<AppNavigator> {
 }
 
 class MainScreen extends StatefulWidget {
-  final VoidCallback? onNavigateToCatalog;
-
-  const MainScreen({super.key, this.onNavigateToCatalog});
+  const MainScreen({super.key});
 
   @override
   State<MainScreen> createState() => _MainScreenState();
 }
 
 class _MainScreenState extends State<MainScreen> {
-  File? _imageFile;
+  XFile? _imageFile;
   File? _processedImageFile;
+  Uint8List? _processedImageBytes;
 
   String _detectedSymbol = "";
   String _symbolCategory = "";
@@ -112,30 +98,76 @@ class _MainScreenState extends State<MainScreen> {
   String _symbolTips = "";
   String _symbolWarning = "";
 
-  // Katalog symbol pro porovnání
-  Map<String, String>? _catalogSymbol;
-
   bool _isProcessing = false;
-  bool _isDecoding = false;
-  bool _isCompressing = false;
   bool _showProcessedImage = false;
   bool _isOnline = true;
 
-  // Cache pro uložení výsledků (aby se nevolalo API zbytečně)
+  // OPTIMALIZACE: Caching
   final Map<String, Map<String, String>> _memoryCache = {};
+
+  // OPTIMALIZACE: Progress tracking
+  String _processingStage = "";
+  double _progress = 0.0;
+
+  // OPTIMALIZACE: Rate limiting
+  DateTime? _lastApiCall;
+  static const _minDelayBetweenCalls = Duration(seconds: 2);
+
+  // OPTIMALIZACE: Statistics
+  int _todayScans = 0;
+  int _cacheHits = 0;
 
   @override
   void initState() {
     super.initState();
     _checkConnectivity();
+    _loadStatistics();
+  }
+
+  Future<void> _loadStatistics() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = DateTime.now().day;
+    final savedDay = prefs.getInt('stats_day') ?? 0;
+
+    if (savedDay != today) {
+      // Nový den - reset statistik
+      await prefs.setInt('stats_day', today);
+      await prefs.setInt('today_scans', 0);
+      await prefs.setInt('cache_hits', 0);
+    }
+
+    setState(() {
+      _todayScans = prefs.getInt('today_scans') ?? 0;
+      _cacheHits = prefs.getInt('cache_hits') ?? 0;
+    });
+  }
+
+  Future<void> _incrementStatistics({bool fromCache = false}) async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _todayScans++;
+      if (fromCache) _cacheHits++;
+    });
+    await prefs.setInt('today_scans', _todayScans);
+    if (fromCache) {
+      await prefs.setInt('cache_hits', _cacheHits);
+    }
   }
 
   Future<void> _checkConnectivity() async {
     try {
-      final result = await InternetAddress.lookup('google.com');
-      setState(() {
-        _isOnline = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
-      });
+      if (kIsWeb) {
+        final online = await checkOnlineStatus();
+        setState(() {
+          _isOnline = online;
+        });
+      } else {
+        // Pro mobilní zařízení použijeme InternetAddress.lookup
+        final result = await InternetAddress.lookup('google.com');
+        setState(() {
+          _isOnline = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+        });
+      }
     } catch (_) {
       setState(() {
         _isOnline = false;
@@ -143,34 +175,40 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  // Vytvoření hashe obrázku pro cache
-  String _getImageHash(List<int> bytes) {
+  // OPTIMALIZACE: MD5 hash pro cache
+  String _getImageHash(Uint8List bytes) {
     return md5.convert(bytes).toString();
   }
 
-  // Uložení výsledku do cache
-  Future<void> _saveToCacheAsync(String hash, Map<String, String> result) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('cache_$hash', json.encode(result));
-  }
-
-  // Načtení z cache
-  Future<Map<String, String>?> _loadFromCacheAsync(String hash) async {
-    // Nejdřív zkus memory cache
+  // OPTIMALIZACE: Načtení z cache
+  Future<Map<String, String>?> _loadFromCache(String hash) async {
+    // Memory cache (rychlé)
     if (_memoryCache.containsKey(hash)) {
-      return _memoryCache[hash];
+
     }
 
-    // Pak zkus persistent cache
+    // Persistent cache (pomalejší, ale přežije restart)
     final prefs = await SharedPreferences.getInstance();
     final cached = prefs.getString('cache_$hash');
+    
     if (cached != null) {
-      final result = Map<String, String>.from(json.decode(cached));
-      _memoryCache[hash] = result; // Ulož i do memory
-      return result;
+      try {
+        final result = Map<String, String>.from(json.decode(cached));
+        _memoryCache[hash] = result; // Ulož i do memory
+        return result;
+      } catch (e) {
+        return null;
+      }
     }
 
     return null;
+  }
+
+  // OPTIMALIZACE: Uložení do cache
+  Future<void> _saveToCache(String hash, Map<String, String> result) async {
+    _memoryCache[hash] = result;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('cache_$hash', json.encode(result));
   }
 
   Future<void> _pickAndCropImage(ImageSource source) async {
@@ -178,114 +216,185 @@ class _MainScreenState extends State<MainScreen> {
     final pickedFile = await picker.pickImage(source: source);
 
     if (pickedFile != null) {
-      CroppedFile? croppedFile = await ImageCropper().cropImage(
-        sourcePath: pickedFile.path,
-        aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
-        uiSettings: [
-          AndroidUiSettings(
-            toolbarTitle: 'Ořízněte jeden symbol',
-            toolbarColor: Colors.blue,
-            toolbarWidgetColor: Colors.white,
-            initAspectRatio: CropAspectRatioPreset.square,
-            lockAspectRatio: true,
-          ),
-          IOSUiSettings(
-            title: 'Ořízněte jeden symbol',
-            aspectRatioLockEnabled: true,
-          ),
-        ],
-      );
-
-      if (croppedFile != null) {
+      if (kIsWeb) {
+        // Pro web přeskočíme ořezávání (ImageCropper nefunguje na webu)
         setState(() {
-          _imageFile = File(croppedFile.path);
+          _imageFile = pickedFile;
           _detectedSymbol = "";
           _showProcessedImage = false;
         });
-        _processAndAnalyze(File(croppedFile.path));
+        _processAndAnalyze(pickedFile);
+      } else {
+        // Pro mobilní zařízení použijeme ořezávání
+        CroppedFile? croppedFile = await ImageCropper().cropImage(
+          sourcePath: pickedFile.path,
+          aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
+          uiSettings: [
+            AndroidUiSettings(
+              toolbarTitle: 'Ořízněte jeden symbol',
+              toolbarColor: Colors.blue,
+              toolbarWidgetColor: Colors.white,
+              initAspectRatio: CropAspectRatioPreset.square,
+              lockAspectRatio: true,
+            ),
+            IOSUiSettings(
+              title: 'Ořízněte jeden symbol',
+              aspectRatioLockEnabled: true,
+            ),
+          ],
+        );
+
+        if (croppedFile != null) {
+          setState(() {
+            _imageFile = XFile(croppedFile.path);
+            _detectedSymbol = "";
+            _showProcessedImage = false;
+          });
+          _processAndAnalyze(XFile(croppedFile.path));
+        }
       }
     }
   }
 
-  Future<void> _processAndAnalyze(File file) async {
-    setState(() => _isProcessing = true);
+  Future<void> _processAndAnalyze(XFile file) async {
+    // OPTIMALIZACE: Rate limiting
+    if (_lastApiCall != null) {
+      final elapsed = DateTime.now().difference(_lastApiCall!);
+      if (elapsed < _minDelayBetweenCalls) {
+        final remaining = _minDelayBetweenCalls - elapsed;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("⏳ Počkejte ${remaining.inSeconds}s před dalším skenem"),
+            duration: remaining,
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+    }
+
+    setState(() {
+      _isProcessing = true;
+      _processingStage = "Načítání obrázku...";
+      _progress = 0.1;
+    });
 
     try {
-      // 1. Dekódování obrázku v izolaci (bez blokování UI)
-      setState(() => _isDecoding = true);
-      
       final bytes = await file.readAsBytes();
-      final original = await compute(
-        ImageProcessingHelper.decodeImageInBg,
-        bytes,
-      );
+      
+      setState(() {
+        _processingStage = "Dekódování...";
+        _progress = 0.2;
+      });
 
+      img.Image? original = img.decodeImage(bytes);
       if (original == null) {
         throw Exception("Nelze dekódovat obrázek");
       }
 
-      // 2. Zpracování obrázku v izolaci
-      setState(() => _isDecoding = false);
-      setState(() => _isCompressing = true);
+      // OPTIMALIZACE: Kontrola cache PŘED preprocessingem
+      final hash = _getImageHash(bytes);
       
-      final result = await compute(
-        ImageProcessingHelper.processImageInBg,
-        original,
-      );
+      setState(() {
+        _processingStage = "Kontrola cache...";
+        _progress = 0.3;
+      });
 
-      // Uložení preprocessovaného obrázku
-      _processedImageFile = await ImageProcessingHelper.saveBytesToFile(
-        img.encodePng(result.preprocessed),
-        'processed',
-        isPng: true,
-      );
-
-      // 3. Zkontroluj cache (aby se šetřily API requesty)
-      final imageHash = _getImageHash(bytes);
-      final cached = await _loadFromCacheAsync(imageHash);
-
+      final cached = await _loadFromCache(hash);
+      
       if (cached != null) {
-        // Máme výsledek v cache!
+        // NAŠLI V CACHE!
         setState(() {
           _detectedSymbol = cached['symbol'] ?? '';
           _symbolCategory = cached['category'] ?? '';
           _symbolDescription = cached['description'] ?? '';
           _symbolTips = cached['tips'] ?? '';
           _symbolWarning = cached['warning'] ?? '';
-          _catalogSymbol = LaundrySymbolCatalog.findMostSimilarSymbol(_detectedSymbol);
-          _isCompressing = false;
+          _processingStage = "Hotovo z cache!";
+          _progress = 1.0;
         });
-      debugPrint("✅ Výsledek načten z cache");
-      return;
+
+        await _incrementStatistics(fromCache: true);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.flash_on, color: Colors.white),
+                SizedBox(width: 8),
+                Text("⚡ Načteno z cache (okamžitě)"),
+              ],
+            ),
+            duration: Duration(seconds: 2),
+            backgroundColor: Colors.green,
+          ),
+        );
+
+        setState(() => _isProcessing = false);
+        return; // KONEC - nepokračovat s API!
       }
 
-      // 4. Zkontroluj připojení
+      // CACHE MISS - pokračuj s preprocessingem
+      setState(() {
+        _processingStage = "Preprocessing...";
+        _progress = 0.4;
+      });
+
+      // OPTIMALIZACE: Použij nový ImageProcessingHelper s isolátem
+      final processedResult = await ImageProcessingHelper.processXFile(
+        _imageFile!,
+        onProgress: (progress) {
+          setState(() {
+            _progress = 0.4 + (progress * 0.4); // 0.4-0.8 range
+          });
+        },
+      );
+
+      // Uložení preprocessovaného obrázku pro zobrazení
+      final processedBytes = img.encodePng(processedResult.preprocessed);
+      if (kIsWeb) {
+        _processedImageBytes = processedBytes;
+        _processedImageFile = null;
+      } else {
+        final tempDir = Directory.systemTemp;
+        final processedPath = '${tempDir.path}/processed_${DateTime.now().millisecondsSinceEpoch}.png';
+        await File(processedPath).writeAsBytes(processedBytes);
+        _processedImageFile = File(processedPath);
+      }
+
+      setState(() {
+        _processingStage = "Komprese...";
+        _progress = 0.8;
+      });
+
+      // Kompresovaný obrázek už máme z result
+      final compressedBytes = processedResult.compressedBytes;
+
+      // Kontrola připojení
       await _checkConnectivity();
 
       if (!_isOnline) {
-        setState(() => _isCompressing = false);
         _showOfflineDialog();
+        setState(() => _isProcessing = false);
         return;
       }
 
-      // 5. Uložení kompresovaného obrázku
-      final compressedFile = await ImageProcessingHelper.saveBytesToFile(
-        result.compressedBytes,
-        'compressed',
-      );
+      setState(() {
+        _processingStage = "Posílám na AI...";
+        _progress = 0.8;
+      });
 
-      setState(() => _isCompressing = false);
+      // Volání AI
+      final aiResponse = await AiService.analyzeImage(compressedBytes);
+      _lastApiCall = DateTime.now(); // Rate limit tracking
 
-      // 6. Pošli na AI (asynchronně)
-      final aiResponse = await AiService.analyzeImage(compressedFile);
+      setState(() {
+        _processingStage = "Parsování výsledku...";
+        _progress = 0.9;
+      });
 
-      // 7. Parsování strukturované odpovědi
+      // Parsování
       final parsed = _parseAiResponse(aiResponse);
-
-      // 8. Hledej podobný symbol v katalogu
-      final catalogMatch = LaundrySymbolCatalog.findMostSimilarSymbol(
-        parsed['symbol'] ?? '',
-      );
 
       setState(() {
         _detectedSymbol = parsed['symbol'] ?? 'Nerozpoznáno';
@@ -293,35 +402,25 @@ class _MainScreenState extends State<MainScreen> {
         _symbolDescription = parsed['description'] ?? '';
         _symbolTips = parsed['tips'] ?? '';
         _symbolWarning = parsed['warning'] ?? '';
-        _catalogSymbol = catalogMatch;
+        _processingStage = "Hotovo!";
+        _progress = 1.0;
       });
 
-      // 9. Ulož do cache pro příště
-      _memoryCache[imageHash] = parsed;
-      _saveToCacheAsync(imageHash, parsed);
+      // ULOŽENÍ DO CACHE
+      await _saveToCache(hash, parsed);
+      await _incrementStatistics(fromCache: false);
 
-      debugPrint("✅ Symbol rozpoznán: $_detectedSymbol");
-
-      // Smazání dočasného souboru
-      await compressedFile.delete();
 
     } catch (e) {
-      debugPrint("❌ Chyba: $e");
       _showErrorDialog(e.toString());
     } finally {
-      setState(() {
-        _isProcessing = false;
-        _isDecoding = false;
-        _isCompressing = false;
-      });
+      setState(() => _isProcessing = false);
     }
   }
 
   Map<String, String> _parseAiResponse(String response) {
-    // Jednoduchý parser pro strukturovanou odpověď
     final result = <String, String>{};
 
-    // Extrakce sekcí pomocí regulárních výrazů
     final symbolMatch = RegExp(r'🏷️ NÁZEV SYMBOLU:\s*(.+?)(?=\n|$)', multiLine: true).firstMatch(response);
     final categoryMatch = RegExp(r'📋 KATEGORIE:\s*(.+?)(?=\n|$)', multiLine: true).firstMatch(response);
     final descMatch = RegExp(r'📖 INSTRUKCE:\s*(.+?)(?=💡|⚠️|$)', multiLine: true, dotAll: true).firstMatch(response);
@@ -356,7 +455,7 @@ class _MainScreenState extends State<MainScreen> {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              widget.onNavigateToCatalog?.call();
+              // Přepni na katalog (potřebuješ přístup k _currentIndex z AppNavigator)
             },
             child: const Text("Otevřít katalog"),
           ),
@@ -370,21 +469,56 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _showErrorDialog(String error) {
+    String title = "Chyba";
+    String message = error;
+    String action = "Zavřít";
+    VoidCallback? actionCallback;
+
+    // OPTIMALIZACE: User-friendly error messages
+    if (error.contains("Quota exceeded") || error.contains("quota")) {
+      title = "Překročen limit";
+      message = "Dosáhli jste denního limitu API.\n\n"
+          "Dnes jste naskenovali: $_todayScans symbolů\n"
+          "Cache hits: $_cacheHits\n\n"
+          "Zkuste to zítra nebo použijte offline katalog.";
+      action = "Otevřít katalog";
+    } else if (error.contains("internet") || error.contains("network")) {
+      title = "Chyba připojení";
+      message = "Zkontrolujte připojení k internetu.\n\n"
+          "Offline katalog je stále dostupný.";
+      action = "Otevřít katalog";
+    } else if (error.contains("RATE_LIMIT")) {
+      title = "Příliš mnoho požadavků";
+      message = "Počkejte chvíli a zkuste znovu.";
+      action = "OK";
+    }
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.error, color: Colors.red),
-            SizedBox(width: 8),
-            Text("Chyba"),
+            const Icon(Icons.error, color: Colors.red),
+            const SizedBox(width: 8),
+            Text(title),
           ],
         ),
-        content: Text("Nepodařilo se analyzovat symbol.\n\n$error"),
+        content: Text(message),
         actions: [
+          if (error.contains("Quota") || error.contains("internet"))
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _processAndAnalyze(_imageFile!); // Retry
+              },
+              child: const Text("Zkusit znovu"),
+            ),
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Zavřít"),
+            onPressed: () {
+              Navigator.pop(context);
+              actionCallback?.call();
+            },
+            child: Text(action),
           ),
         ],
       ),
@@ -405,9 +539,9 @@ class _MainScreenState extends State<MainScreen> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.black87,
         actions: [
-          // Indikátor online/offline
+          // Online/Offline indikátor
           Padding(
-            padding: const EdgeInsets.only(right: 16),
+            padding: const EdgeInsets.only(right: 8),
             child: Row(
               children: [
                 Icon(
@@ -425,6 +559,33 @@ class _MainScreenState extends State<MainScreen> {
                 ),
               ],
             ),
+          ),
+          // OPTIMALIZACE: Statistiky
+          PopupMenuButton(
+            icon: const Icon(Icons.info_outline),
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                enabled: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "Dnešní statistiky",
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const Divider(),
+                    Text("Naskenováno: $_todayScans"),
+                    Text("Z cache: $_cacheHits"),
+                    Text("API volání: ${_todayScans - _cacheHits}"),
+                    if (_todayScans > 0)
+                      Text(
+                        "Úspora: ${(_cacheHits / _todayScans * 100).toStringAsFixed(0)}%",
+                        style: const TextStyle(color: Colors.green),
+                      ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -445,8 +606,10 @@ class _MainScreenState extends State<MainScreen> {
                   padding: const EdgeInsets.all(16.0),
                   child: Column(
                     children: [
-                      // Toggle mezi originálem a preprocessem
-                      if (_imageFile != null && _processedImageFile != null)
+                      // Toggle - zobraz na webu i mobilu
+                      if (_imageFile != null && 
+                          ((kIsWeb && _processedImageBytes != null) || 
+                           (!kIsWeb && _processedImageFile != null)))
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -468,7 +631,7 @@ class _MainScreenState extends State<MainScreen> {
                           ],
                         ),
 
-                      // Zobrazení obrázku
+                      // Obrázek
                       Container(
                         height: 250,
                         width: 250,
@@ -483,11 +646,22 @@ class _MainScreenState extends State<MainScreen> {
                         child: _imageFile != null
                             ? ClipRRect(
                                 borderRadius: BorderRadius.circular(11),
-                                child: Image.file(
-                                  _showProcessedImage && _processedImageFile != null
-                                      ? _processedImageFile!
-                                      : _imageFile!,
-                                  fit: BoxFit.cover,
+                                child: FutureBuilder<Uint8List>(
+                                  future: _showProcessedImage
+                                      ? (_processedImageBytes != null
+                                          ? Future.value(_processedImageBytes!)
+                                          : _processedImageFile!.readAsBytes())
+                                      : _imageFile!.readAsBytes(),
+                                  builder: (context, snapshot) {
+                                    if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+                                      return Image.memory(
+                                        snapshot.data!,
+                                        fit: BoxFit.cover,
+                                      );
+                                    } else {
+                                      return const Center(child: CircularProgressIndicator());
+                                    }
+                                  },
                                 ),
                               )
                             : const Column(
@@ -509,7 +683,7 @@ class _MainScreenState extends State<MainScreen> {
 
                       const SizedBox(height: 20),
 
-                      // Tlačítka pro výběr zdroje
+                      // Tlačítka
                       Row(
                         children: [
                           Expanded(
@@ -552,7 +726,7 @@ class _MainScreenState extends State<MainScreen> {
 
               const SizedBox(height: 20),
 
-              // Načítání
+              // OPTIMALIZACE: Lepší progress indikátor
               if (_isProcessing)
                 Card(
                   elevation: 4,
@@ -563,38 +737,32 @@ class _MainScreenState extends State<MainScreen> {
                     padding: const EdgeInsets.all(20.0),
                     child: Column(
                       children: [
-                        const CircularProgressIndicator(),
-                        const SizedBox(height: 16),
-                        if (_isDecoding)
-                          const Row(
-                            children: [
-                              Icon(Icons.photo, size: 20, color: Colors.blue),
-                              SizedBox(width: 12),
-                              Text("Dekódování obrázku..."),
-                            ],
-                          )
-                        else if (_isCompressing)
-                          const Row(
-                            children: [
-                              Icon(Icons.compress, size: 20, color: Colors.blue),
-                              SizedBox(width: 12),
-                              Text("Zpracování a kompresi..."),
-                            ],
-                          )
-                        else
-                          const Row(
-                            children: [
-                              Icon(Icons.smart_toy, size: 20, color: Colors.blue),
-                              SizedBox(width: 12),
-                              Text("AI analyzuje symbol..."),
-                            ],
+                        LinearProgressIndicator(
+                          value: _progress,
+                          backgroundColor: Colors.grey[200],
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Colors.blue,
                           ),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          _processingStage,
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          "${(_progress * 100).toInt()}%",
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                          ),
+                        ),
                       ],
                     ),
                   ),
                 ),
 
-              // Karta s výsledkem
+              // Výsledky (stejné jako předtím, ale s lepším UX)
               if (_detectedSymbol.isNotEmpty && !_isProcessing)
                 Card(
                   elevation: 4,
@@ -619,7 +787,7 @@ class _MainScreenState extends State<MainScreen> {
                         ),
                         const SizedBox(height: 16),
 
-                        // Název symbolu
+                        // Název
                         Center(
                           child: Text(
                             _detectedSymbol,
@@ -653,93 +821,6 @@ class _MainScreenState extends State<MainScreen> {
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
                                 ),
-                              ),
-                            ),
-                          ),
-
-                        // Porovnání s katalogem
-                        if (_catalogSymbol != null)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: Colors.green.shade200,
-                                  width: 2,
-                                ),
-                              ),
-                              padding: const EdgeInsets.all(12),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Row(
-                                    children: [
-                                      Icon(
-                                        Icons.check_circle,
-                                        color: Colors.green,
-                                        size: 18,
-                                      ),
-                                      SizedBox(width: 8),
-                                      Text(
-                                        "Porovnání s katalogem",
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.green,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Row(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      if (_catalogSymbol!['asset'] != null)
-                                        Container(
-                                          width: 80,
-                                          height: 80,
-                                          padding: const EdgeInsets.all(8),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white,
-                                            borderRadius: BorderRadius.circular(12),
-                                            border: Border.all(
-                                              color: Colors.green.shade100,
-                                            ),
-                                          ),
-                                          child: Image.asset(
-                                            _catalogSymbol!['asset']!,
-                                            fit: BoxFit.contain,
-                                          ),
-                                        ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              "${_catalogSymbol!['čeština']} (${_catalogSymbol!['anglicky']})",
-                                              style: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 6),
-                                            Text(
-                                              _catalogSymbol!['popis'] ?? '',
-                                              style: TextStyle(
-                                                fontSize: 12,
-                                                color: Colors.grey[700],
-                                                height: 1.4,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
                               ),
                             ),
                           ),
@@ -829,6 +910,20 @@ class _MainScreenState extends State<MainScreen> {
                             ),
                           ),
                         ],
+
+                        // OPTIMALIZACE: Retry tlačítko
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () => _processAndAnalyze(_imageFile!),
+                            icon: const Icon(Icons.refresh),
+                            label: const Text("Zkusit znovu"),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),
